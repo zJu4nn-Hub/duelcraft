@@ -46,13 +46,11 @@ jobs:
           if ($LASTEXITCODE) { throw "native build failed" }
           Get-Item fabric/src/main/resources/natives/duelcraft_native.dll | Format-List Name,Length
 
-      - name: Generated code and card scripts
+      # the generated Java (gen/) and the card tables (cards.tsv, effect_hints.tsv) are committed upstream; the author
+      # regenerates them from Master Duel research files that never go in the repo, so only the scripts are packed here
+      - name: Card scripts
         shell: pwsh
         run: |
-          python -I tools/preflight.py --quiet
-          if ($LASTEXITCODE) { throw "preflight has blocking findings" }
-          python -I tools/gen_code.py
-          if ($LASTEXITCODE) { throw "gen_code failed" }
           python -I tools/pack_scripts.py
           if ($LASTEXITCODE) { throw "pack_scripts failed" }
 
