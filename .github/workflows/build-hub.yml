@@ -1,0 +1,107 @@
+# Build used by the zJu4nn Hub "Mashups" tab — everything compiled HERE from this fork's source:
+# the native duel engine (EDOPro ocgcore + bcdec, MSVC), the packed card scripts (Project Ignis CardScripts) and the
+# Fabric mod. Same steps as tools/package.ps1 (the Hub brings its own Prism Launcher and Fabric API, so only the mod
+# jar is published; e4mc is left out).
+# Upstream: https://github.com/Pitorad/duelcraft (AGPL-3.0-or-later). Source of this build = this fork at the commit
+# in the release notes, submodules included.
+name: build-hub
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. hub-v0.2.2-1)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Native library (MSVC)
+        shell: pwsh
+        run: |
+          # build_native.bat points at the Build Tools install; the runner has Visual Studio Enterprise
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if (!$vs) { throw "MSVC not found" }
+          $bat = Get-Content tools/build_native.bat -Raw
+          $bat = $bat.Replace('C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools', $vs)
+          Set-Content tools/build_native_ci.bat $bat -Encoding ascii
+          cmd /c tools\build_native_ci.bat
+          if ($LASTEXITCODE) { throw "native build failed" }
+          Get-Item fabric/src/main/resources/natives/duelcraft_native.dll | Format-List Name,Length
+
+      - name: Generated code and card scripts
+        shell: pwsh
+        run: |
+          python -I tools/preflight.py --quiet
+          if ($LASTEXITCODE) { throw "preflight has blocking findings" }
+          python -I tools/gen_code.py
+          if ($LASTEXITCODE) { throw "gen_code failed" }
+          python -I tools/pack_scripts.py
+          if ($LASTEXITCODE) { throw "pack_scripts failed" }
+
+      - name: Fabric mod
+        shell: pwsh
+        run: |
+          $env:GRADLE_USER_HOME = Join-Path (Get-Location) '.tools\gradle-home'
+          .\fabric\gradlew.bat -p .\fabric --no-daemon --no-configuration-cache build -x test
+          if ($LASTEXITCODE) { throw "mod build failed" }
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path fabric/gradle.properties -Pattern '^version=(.+)$').Matches[0].Groups[1].Value.Trim()
+          $jar = "fabric/build/libs/duelcraft-$ver.jar"
+          if (!(Test-Path $jar)) { throw "missing $jar" }
+          $ocg = git -C third_party/ocgcore rev-parse HEAD
+          $scr = git -C third_party/CardScripts rev-parse HEAD
+          $p = 'pkg'
+          New-Item -ItemType Directory "$p/mods" -Force | Out-Null
+          Copy-Item $jar "$p/mods/duelcraft-$ver.jar"
+          Copy-Item LICENSE "$p/LICENSE.txt"
+          Copy-Item tools/minecraft-bundle/THIRD-PARTY.txt "$p/THIRD-PARTY.txt"
+          @(
+            "DuelCraft $ver (build do zJu4nn Hub)",
+            '',
+            'Cartas de Yu-Gi-Oh! Master Duel dentro do Minecraft. Original de Pitorad (github.com/Pitorad/duelcraft),',
+            'publicado no Hub com a permissao e os creditos do autor. Licenca AGPL-3.0-or-later.',
+            "Codigo-fonte deste build: https://github.com/${{ github.repository }} commit ${{ github.sha }}",
+            "Motor de duelo: edo9300/ygopro-core $ocg; scripts das cartas: ProjectIgnis/CardScripts $scr.",
+            'Nada do Master Duel ou do Minecraft vai neste pacote. Projeto de fas, sem ligacao com Konami, Mojang ou Microsoft.'
+          ) | Set-Content "$p/LEIA.txt" -Encoding utf8
+          $sums = Get-ChildItem $p -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring((Resolve-Path $p).Path.Length + 1).Replace('\','/')
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $rel"
+          }
+          $sums | Set-Content "$p/SHA256SUMS.txt" -Encoding ascii
+          $sums
+          $zip = "duelcraft-hub-$ver.zip"
+          Compress-Archive -Path "$p/*" -DestinationPath $zip
+          "ZIP=$zip" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "VER=$ver" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "OCG=$ocg" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          "SCR=$scr" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          Get-FileHash $zip -Algorithm SHA256 | Format-List
+
+      - name: Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ inputs.tag }}" $env:ZIP --repo "${{ github.repository }}" --title "DuelCraft $env:VER (zJu4nn Hub)" --notes "Build of Pitorad/duelcraft $env:VER for the zJu4nn Hub Mashups tab, with the author's permission. Everything compiled from this fork at ${{ github.sha }} (ocgcore $env:OCG, CardScripts $env:SCR). AGPL-3.0-or-later: the source is this repository."
